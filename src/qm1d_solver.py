@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import math
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Optional
@@ -78,6 +79,10 @@ class QM1DSolver:
         self.grid = self._make_grid(config.L, config.h_target)
         self._validate_grid_vs_fd_order(self.grid, config.fd_order, config.n_states)
 
+        self._validate_potential_expression(
+            expr=config.potential_expr,
+            params=config.parameters,
+        )
         self.potential_fn = self._build_potential_function(
             expr=config.potential_expr,
             params=config.parameters,
@@ -136,6 +141,26 @@ class QM1DSolver:
             raise QM1DError(
                 f"n_states must be smaller than the number of interior points ({grid.N_interior})."
             )
+
+    @staticmethod
+    def _validate_potential_expression(
+        expr: str, params: Optional[Dict[str, float]] = None
+    ) -> None:
+        params = dict(params or {})
+        allowed_names = {"x", *(_ALLOWED_MATH_FUNCS.keys()), *(params.keys())}
+
+        try:
+            tree = ast.parse(expr, mode="eval")
+        except SyntaxError as exc:
+            raise QM1DError(f"Invalid potential expression syntax: {exc.msg}.") from exc
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and node.id not in allowed_names:
+                raise ValueError(
+                    "Invalid symbol in potential_expr: "
+                    f"'{node.id}'. Only 'x', parameter names, and allowed math names "
+                    f"{sorted(_ALLOWED_MATH_FUNCS.keys())} are permitted."
+                )
 
     @staticmethod
     def _build_potential_function(

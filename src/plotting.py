@@ -8,7 +8,7 @@ from qm1d_solver import QM1DResult
 
 def plot_potential_and_orbitals(
     result: QM1DResult,
-    output_pdf: str = "harmonic_oscillator_orbitals.pdf",
+    output_pdf: str = "user_input_potential_orbitals.pdf",
     show: bool = False,
 ) -> str:
     x = result.grid.x_full
@@ -32,7 +32,7 @@ def plot_potential_and_orbitals(
     ax_pot.set_xlabel("x (Bohr)")
     ax_pot.set_ylabel("Potential energy (Hartree)", color="red")
     ax_orb.set_ylabel("Orbital value")
-    ax_pot.set_title("1D Harmonic Oscillator: Potential and Orbitals")
+    ax_pot.set_title(output_pdf)
 
     ax_pot.tick_params(axis="y", labelcolor="red")
     ax_pot.grid(True, alpha=0.3)
