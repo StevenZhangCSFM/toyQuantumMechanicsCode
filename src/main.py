@@ -21,12 +21,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run the harmonic-oscillator test.",
     )
     parser.add_argument(
-        "--input_potential",
+        "--potential_expr",
         type=str,
         help=(
-            "Run the solver with a user-provided 1D potential expression, such as "
-            "'0.5*x**2' or 'sin(x) + 0.1*x**2'."
+            "User-provided 1D potential expression, such as "
+            "'0.5*x**2' or 'sin(x) + 0.1*x**2'. Required unless "
+            "--test_zero or --test_harmonic is specified."
         ),
+    )
+    parser.add_argument(
+        "--L",
+        type=float,
+        help="Half-box length L in Bohr for user-input runs.",
+    )
+    parser.add_argument(
+        "--h_target",
+        type=float,
+        help="Target grid spacing in Bohr for user-input runs.",
+    )
+    parser.add_argument(
+        "--fd_order",
+        type=int,
+        help="Finite-difference order for user-input runs.",
+    )
+    parser.add_argument(
+        "--n_states",
+        type=int,
+        help="Number of eigenstates to compute for user-input runs.",
     )
     parser.add_argument(
         "--show_plot",
@@ -41,49 +62,57 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def make_zero_potential_test_config() -> QM1DConfig:
+def make_default_config() -> QM1DConfig:
+    """Return the default configuration for user-input runs.
+
+    This reuses the numerical settings of the harmonic-oscillator reference
+    case, but leaves potential_expr blank so the user must provide it.
+    """
     return QM1DConfig(
         L=10.0,
         h_target=0.05,
         fd_order=6,
         n_states=4,
-        potential_expr="0.0*x",
+        potential_expr="",
         parameters={},
         tol=1e-12,
     )
+
+
+def make_zero_potential_test_config() -> QM1DConfig:
+    config = make_default_config()
+    config.potential_expr = "0.0*x"
+    return config
 
 
 def make_harmonic_oscillator_config() -> QM1DConfig:
-    return QM1DConfig(
-        L=10.0,
-        h_target=0.05,
-        fd_order=6,
-        n_states=4,
-        potential_expr="0.5*x**2",
-        parameters={},
-        tol=1e-12,
-    )
+    config = make_default_config()
+    config.potential_expr = "0.5*x**2"
+    return config
 
 
-def make_user_input_potential_config(potential_expr: str) -> QM1DConfig:
-    """
-    Build a user-input potential configuration.
+def make_user_input_config(args: argparse.Namespace) -> QM1DConfig:
+    """Build a QM1DConfig from command-line input for a user-defined potential."""
+    config = make_default_config()
 
-    For now, reuse the numerical settings from the zero-potential reference case
-    and only replace the potential expression.
-    """
-    reference = make_zero_potential_test_config()
-    return QM1DConfig(
-        L=reference.L,
-        h_target=reference.h_target,
-        fd_order=reference.fd_order,
-        n_states=reference.n_states,
-        potential_expr=potential_expr,
-        parameters=dict(reference.parameters),
-        tol=reference.tol,
-        maxiter=reference.maxiter,
-        ncv=reference.ncv,
-    )
+    if not args.potential_expr:
+        raise ValueError(
+            "Missing required argument --potential_expr when not running "
+            "--test_zero or --test_harmonic."
+        )
+
+    config.potential_expr = args.potential_expr
+
+    if args.L is not None:
+        config.L = args.L
+    if args.h_target is not None:
+        config.h_target = args.h_target
+    if args.fd_order is not None:
+        config.fd_order = args.fd_order
+    if args.n_states is not None:
+        config.n_states = args.n_states
+
+    return config
 
 
 def _harmonic_oscillator_theoretical_eigenvalues(n_states: int) -> np.ndarray:
@@ -171,19 +200,13 @@ def run_harmonic_oscillator_test(
     return result
 
 
-def run_user_input_potential(
-    potential_expr: str,
+def run_user_input(
+    args: argparse.Namespace,
     show_plot: bool = False,
     output_pdf: str = "user_input_potential_orbitals.pdf",
 ) -> QM1DResult:
-    """
-    Solve and plot a user-supplied 1D potential.
-
-    The numerical parameters are currently inherited from
-    make_zero_potential_test_config(), while potential_expr is replaced by the
-    user-provided formula string.
-    """
-    result = solve_qm1d(make_user_input_potential_config(potential_expr))
+    """Solve and plot a user-supplied 1D potential from parsed CLI arguments."""
+    result = solve_qm1d(make_user_input_config(args))
     print_summary(result)
     saved_path = plot_potential_and_orbitals(result, output_pdf=output_pdf, show=show_plot)
     print(f"\nSaved figure to: {saved_path}")
@@ -193,21 +216,13 @@ def run_user_input_potential(
 def main() -> QM1DResult | None:
     args = build_parser().parse_args()
 
-    if args.input_potential is not None:
-        return run_user_input_potential(
-            potential_expr=args.input_potential,
-            show_plot=args.show_plot,
-            output_pdf=args.output_pdf,
-        )
-
     if args.test_zero:
         return run_zero_potential_test()
 
     if args.test_harmonic:
         return run_harmonic_oscillator_test(show_plot=args.show_plot, output_pdf=args.output_pdf)
 
-    print("Please choose a test to run: --test_zero, --test_harmonic, or --input_potential.")
-    return None
+    return run_user_input(args=args, show_plot=args.show_plot, output_pdf=args.output_pdf)
 
 
 if __name__ == "__main__":
