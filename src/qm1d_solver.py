@@ -41,6 +41,7 @@ class QM1DConfig:
     fd_order: int
     n_states: int
     potential_expr: str
+    boundary: str = "dirichlet"
     parameters: Dict[str, float] = field(default_factory=dict)
     tol: float = 1e-10
     maxiter: Optional[int] = None
@@ -76,7 +77,7 @@ class QM1DSolver:
         self.config = config
         self._validate_basic_input(config)
 
-        self.grid = self._make_grid(config.L, config.h_target)
+        self.grid = self._make_grid(config.L, config.h_target, config.boundary)
         self._validate_grid_vs_fd_order(self.grid, config.fd_order, config.n_states)
 
         self._validate_potential_expression(
@@ -89,13 +90,17 @@ class QM1DSolver:
         )
         self.V_full = self._evaluate_potential_on_grid(self.potential_fn, self.grid.x_full)
         self._validate_potential_values(self.V_full)
-        self.V_interior = self.V_full[1:-1].copy()
+        if config.boundary == "dirichlet":
+            self.V_interior = self.V_full[1:-1].copy()
+        else:
+            self.V_interior = self.V_full[:-1].copy()
 
         self.hamiltonian = Hamiltonian(
             N_grid=self.grid.N_grid,
             h=self.grid.h,
             fd_order=config.fd_order,
             V_interior=self.V_interior,
+            boundary=config.boundary,
         )
         self.operator = self.hamiltonian.make_operator()
 
@@ -109,21 +114,30 @@ class QM1DSolver:
             raise QM1DError("fd_order must be one of 2, 4, 6, 8, 10.")
         if config.n_states < 1:
             raise QM1DError("n_states must be at least 1.")
+        if config.boundary not in ("dirichlet", "periodic", "bloch"):
+            raise QM1DError("boundary must be one of: dirichlet, periodic, bloch.")
+        if config.boundary == "bloch":
+            raise QM1DError("bloch is not developed yet.")
         if not config.potential_expr or not config.potential_expr.strip():
             raise QM1DError("potential_expr must be a non-empty string.")
 
     @staticmethod
-    def _make_grid(L: float, h_target: float) -> Grid1D:
+    def _make_grid(L: float, h_target: float, boundary: str = "dirichlet") -> Grid1D:
         N_grid = int(round(L / h_target)) + 1
         N_grid = max(N_grid, 3)
 
         h = L / (N_grid - 1)
         x_full = np.linspace(-0.5 * L, 0.5 * L, N_grid, dtype=float)
-        x_interior = x_full[1:-1].copy()
+        if boundary == "periodic":
+            x_interior = x_full[:-1].copy()
+            N_interior = N_grid - 1
+        else:
+            x_interior = x_full[1:-1].copy()
+            N_interior = N_grid - 2
 
         return Grid1D(
             N_grid=N_grid,
-            N_interior=N_grid - 2,
+            N_interior=N_interior,
             h=h,
             x_full=x_full,
             x_interior=x_interior,
@@ -209,10 +223,16 @@ class QM1DSolver:
         return normalized
 
     @staticmethod
-    def _reconstruct_full_orbitals(interior_vectors: np.ndarray, N_grid: int) -> np.ndarray:
+    def _reconstruct_full_orbitals(
+        interior_vectors: np.ndarray, N_grid: int, boundary: str = "dirichlet"
+    ) -> np.ndarray:
         n_states = interior_vectors.shape[1]
         full = np.zeros((N_grid, n_states), dtype=float)
-        full[1:-1, :] = interior_vectors
+        if boundary == "periodic":
+            full[:-1, :] = interior_vectors
+            full[-1, :] = interior_vectors[0, :]
+        else:
+            full[1:-1, :] = interior_vectors
         return full
 
     def solve(self) -> QM1DResult:
@@ -239,7 +259,9 @@ class QM1DSolver:
         eigenvectors = np.asarray(eigenvectors[:, order], dtype=float)
 
         eigenvectors = self._normalize_eigenvectors(eigenvectors, self.grid.h)
-        orbitals_full = self._reconstruct_full_orbitals(eigenvectors, self.grid.N_grid)
+        orbitals_full = self._reconstruct_full_orbitals(
+            eigenvectors, self.grid.N_grid, self.config.boundary
+        )
         densities_full = np.abs(orbitals_full) ** 2
 
         return QM1DResult(

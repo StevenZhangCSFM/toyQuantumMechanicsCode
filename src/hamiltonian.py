@@ -8,19 +8,23 @@ from scipy.sparse.linalg import LinearOperator
 
 class Hamiltonian:
     """
-    Discretized 1D Hamiltonian with Dirichlet boundary conditions.
-
-    The unknown vector stores interior grid values only. Boundary values are
-    enforced through odd extension when centered finite-difference stencils
-    reach outside the domain.
+    Discretized 1D Hamiltonian with Dirichlet or periodic boundary conditions.
     """
 
-    def __init__(self, N_grid: int, h: float, fd_order: int, V_interior: np.ndarray):
+    def __init__(
+        self,
+        N_grid: int,
+        h: float,
+        fd_order: int,
+        V_interior: np.ndarray,
+        boundary: str = "dirichlet",
+    ):
         self.N_grid = int(N_grid)
         self.h = float(h)
         self.fd_order = int(fd_order)
         self.V_interior = np.asarray(V_interior, dtype=float)
-        self.N_interior = self.N_grid - 2
+        self.boundary = str(boundary)
+        self.N_interior = self.N_grid - 2 if self.boundary == "dirichlet" else self.N_grid - 1
 
         if self.N_grid < 3:
             raise ValueError("N_grid must be at least 3.")
@@ -28,6 +32,8 @@ class Hamiltonian:
             raise ValueError("Grid spacing h must be positive.")
         if self.fd_order not in (2, 4, 6, 8, 10):
             raise ValueError("fd_order must be one of 2, 4, 6, 8, 10.")
+        if self.boundary not in ("dirichlet", "periodic"):
+            raise ValueError("boundary must be 'dirichlet' or 'periodic'.")
         if self.V_interior.shape != (self.N_interior,):
             raise ValueError(
                 f"V_interior shape {self.V_interior.shape} does not match ({self.N_interior},)."
@@ -94,6 +100,17 @@ class Hamiltonian:
 
         return sign * float(u[j_mapped - 1])
 
+    def _periodic_extended_value(self, u: np.ndarray, j: int) -> float:
+        """
+        Return the periodic full-grid value phi_j.
+
+        For periodic BC, the unknown vector u stores full-grid indices
+        0..N_grid-2, and the last full-grid point N_grid-1 is identified with 0.
+        """
+        period = self.N_grid - 1
+        j_mapped = int(j) % period
+        return float(u[j_mapped])
+
     def _apply_hamiltonian(self, u: np.ndarray) -> np.ndarray:
         if u.shape != (self.N_interior,):
             raise ValueError(
@@ -105,12 +122,15 @@ class Hamiltonian:
         inv_h2 = 1.0 / (self.h * self.h)
 
         for k in range(self.N_interior):
-            full_i = k + 1
+            full_i = k + 1 if self.boundary == "dirichlet" else k
             lap_sum = 0.0
 
             for m in range(-p, p + 1):
                 coeff = self._weights[m + p]
-                val = self._odd_extended_value(u, full_i + m)
+                if self.boundary == "dirichlet":
+                    val = self._odd_extended_value(u, full_i + m)
+                else:
+                    val = self._periodic_extended_value(u, full_i + m)
                 lap_sum += coeff * val
 
             kinetic = -0.5 * inv_h2 * lap_sum

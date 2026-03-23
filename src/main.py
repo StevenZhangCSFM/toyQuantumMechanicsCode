@@ -50,6 +50,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Number of eigenstates to compute for user-input runs.",
     )
     parser.add_argument(
+        "--boundary",
+        type=str,
+        help="Boundary condition: dirichlet, periodic, or bloch.",
+    )
+    parser.add_argument(
         "--show_plot",
         action="store_true",
         help="Display the plot window in addition to saving the PDF.",
@@ -74,6 +79,7 @@ def make_default_config() -> QM1DConfig:
         fd_order=6,
         n_states=4,
         potential_expr="",
+        boundary="dirichlet",
         parameters={},
         tol=1e-12,
     )
@@ -111,6 +117,8 @@ def make_user_input_config(args: argparse.Namespace) -> QM1DConfig:
         config.fd_order = args.fd_order
     if args.n_states is not None:
         config.n_states = args.n_states
+    if args.boundary is not None:
+        config.boundary = args.boundary
 
     return config
 
@@ -135,6 +143,7 @@ def print_summary(result: QM1DResult) -> None:
     print(f"fd_order        = {result.config.fd_order}")
     print(f"n_states        = {result.config.n_states}")
     print(f"potential_expr  = {result.config.potential_expr}")
+    print(f"boundary        = {result.config.boundary}")
     print("Eigenvalues (Hartree):")
     for i, ev in enumerate(result.eigenvalues, start=1):
         print(f"  state {i:2d}: {ev:.14f}")

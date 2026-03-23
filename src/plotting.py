@@ -25,6 +25,19 @@ def plot_potential_and_orbitals(
 
     ax_pot.plot(x, V, color="red", linewidth=2.5, label="Potential V(x)")
 
+    boundary = getattr(result.config, "boundary", "dirichlet")
+    bc_marker = "s" if boundary == "dirichlet" else "o"
+    ax_pot.plot(
+        [0.0, 1.0],
+        [0.0, 0.0],
+        linestyle="None",
+        marker=bc_marker,
+        markersize=7,
+        color="black",
+        transform=ax_pot.transAxes,
+        clip_on=False,
+    )
+
     orbital_colors: list[str] = []
     for idx in range(orbitals.shape[1]):
         (line,) = ax_orb.plot(
