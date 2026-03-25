@@ -55,6 +55,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Boundary condition: dirichlet, periodic, or bloch.",
     )
     parser.add_argument(
+        "--kpt",
+        type=float,
+        help="Scalar Bloch wavevector in 1/Bohr. Used only when --boundary bloch. This is NOT the relative kpt in the first Brillouin zone!",
+    )
+    parser.add_argument(
         "--show_plot",
         action="store_true",
         help="Display the plot window in addition to saving the PDF.",
@@ -80,6 +85,7 @@ def make_default_config() -> QM1DConfig:
         n_states=4,
         potential_expr="",
         boundary="dirichlet",
+        kpt=0.0,
         parameters={},
         tol=1e-12,
     )
@@ -119,6 +125,8 @@ def make_user_input_config(args: argparse.Namespace) -> QM1DConfig:
         config.n_states = args.n_states
     if args.boundary is not None:
         config.boundary = args.boundary
+    if args.kpt is not None:
+        config.kpt = args.kpt
 
     return config
 
@@ -144,6 +152,10 @@ def print_summary(result: QM1DResult) -> None:
     print(f"n_states        = {result.config.n_states}")
     print(f"potential_expr  = {result.config.potential_expr}")
     print(f"boundary        = {result.config.boundary}")
+    if result.config.boundary == "bloch":
+        print(f"kpt_input       = {result.config.kpt:.14f} 1/Bohr")
+        print(f"kpt_reduced     = {result.config.kpt_reduced:.14f} 1/Bohr")
+        print(f"-kpt_reduced    = {-result.config.kpt_reduced:.14f} 1/Bohr")
     print("Eigenvalues (Hartree):")
     for i, ev in enumerate(result.eigenvalues, start=1):
         print(f"  state {i:2d}: {ev:.14f}")

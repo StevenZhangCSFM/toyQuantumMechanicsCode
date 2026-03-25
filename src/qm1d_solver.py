@@ -42,6 +42,8 @@ class QM1DConfig:
     n_states: int
     potential_expr: str
     boundary: str = "dirichlet"
+    kpt: float = 0.0
+    kpt_reduced: float = 0.0
     parameters: Dict[str, float] = field(default_factory=dict)
     tol: float = 1e-10
     maxiter: Optional[int] = None
@@ -76,6 +78,7 @@ class QM1DSolver:
     def __init__(self, config: QM1DConfig):
         self.config = config
         self._validate_basic_input(config)
+        config.kpt_reduced = self._reduce_k_to_first_bz(config.kpt, config.L)
 
         self.grid = self._make_grid(config.L, config.h_target, config.boundary)
         self._validate_grid_vs_fd_order(self.grid, config.fd_order, config.n_states)
@@ -90,6 +93,7 @@ class QM1DSolver:
         )
         self.V_full = self._evaluate_potential_on_grid(self.potential_fn, self.grid.x_full)
         self._validate_potential_values(self.V_full)
+        self._warn_if_nonperiodic_bloch_potential()
         if config.boundary == "dirichlet":
             self.V_interior = self.V_full[1:-1].copy()
         else:
@@ -101,6 +105,7 @@ class QM1DSolver:
             fd_order=config.fd_order,
             V_interior=self.V_interior,
             boundary=config.boundary,
+            kpt=config.kpt_reduced,
         )
         self.operator = self.hamiltonian.make_operator()
 
@@ -116,10 +121,23 @@ class QM1DSolver:
             raise QM1DError("n_states must be at least 1.")
         if config.boundary not in ("dirichlet", "periodic", "bloch"):
             raise QM1DError("boundary must be one of: dirichlet, periodic, bloch.")
-        if config.boundary == "bloch":
-            raise QM1DError("bloch is not developed yet.")
+        if config.boundary != "bloch" and abs(config.kpt) > 0.0:
+            raise QM1DError("kpt may only be provided when boundary='bloch'.")
+        if not np.isfinite(config.kpt):
+            raise QM1DError("kpt must be finite.")
         if not config.potential_expr or not config.potential_expr.strip():
             raise QM1DError("potential_expr must be a non-empty string.")
+
+    @staticmethod
+    def _reduce_k_to_first_bz(kpt: float, L: float) -> float:
+        G = 2.0 * np.pi / L
+        k_reduced = float(kpt) % G
+        if k_reduced > 0.5 * G:
+            k_reduced -= G
+        upper_edge = np.pi / L
+        if np.isclose(k_reduced, upper_edge, atol=1e-14, rtol=0.0):
+            k_reduced = -upper_edge
+        return float(k_reduced)
 
     @staticmethod
     def _make_grid(L: float, h_target: float, boundary: str = "dirichlet") -> Grid1D:
@@ -128,7 +146,7 @@ class QM1DSolver:
 
         h = L / (N_grid - 1)
         x_full = np.linspace(-0.5 * L, 0.5 * L, N_grid, dtype=float)
-        if boundary == "periodic":
+        if boundary in ("periodic", "bloch"):
             x_interior = x_full[:-1].copy()
             N_interior = N_grid - 1
         else:
@@ -211,9 +229,18 @@ class QM1DSolver:
         if np.iscomplexobj(V_full):
             raise QM1DError("Potential must be real-valued.")
 
+    def _warn_if_nonperiodic_bloch_potential(self) -> None:
+        if self.config.boundary != "bloch":
+            return
+        if not np.isclose(self.V_full[0], self.V_full[-1], atol=1e-10, rtol=1e-8):
+            print(
+                "Warning: boundary='bloch' assumes a periodic potential over the cell, "
+                "but V(-L/2) and V(L/2) differ on the current grid."
+            )
+
     @staticmethod
     def _normalize_eigenvectors(eigenvectors: np.ndarray, h: float) -> np.ndarray:
-        normalized = np.array(eigenvectors, dtype=float, copy=True)
+        normalized = np.array(eigenvectors, copy=True)
         for s in range(normalized.shape[1]):
             vec = normalized[:, s]
             norm = math.sqrt(float(np.sum(np.abs(vec) ** 2) * h))
@@ -224,13 +251,20 @@ class QM1DSolver:
 
     @staticmethod
     def _reconstruct_full_orbitals(
-        interior_vectors: np.ndarray, N_grid: int, boundary: str = "dirichlet"
+        interior_vectors: np.ndarray,
+        N_grid: int,
+        boundary: str = "dirichlet",
+        kpt: float = 0.0,
+        L: float = 0.0,
     ) -> np.ndarray:
         n_states = interior_vectors.shape[1]
-        full = np.zeros((N_grid, n_states), dtype=float)
+        full = np.zeros((N_grid, n_states), dtype=interior_vectors.dtype)
         if boundary == "periodic":
             full[:-1, :] = interior_vectors
             full[-1, :] = interior_vectors[0, :]
+        elif boundary == "bloch":
+            full[:-1, :] = interior_vectors
+            full[-1, :] = interior_vectors[0, :] * np.exp(1j * kpt * L)
         else:
             full[1:-1, :] = interior_vectors
         return full
@@ -256,11 +290,15 @@ class QM1DSolver:
 
         order = np.argsort(eigenvalues)
         eigenvalues = np.asarray(eigenvalues[order], dtype=float)
-        eigenvectors = np.asarray(eigenvectors[:, order], dtype=float)
+        eigenvectors = np.asarray(eigenvectors[:, order])
 
         eigenvectors = self._normalize_eigenvectors(eigenvectors, self.grid.h)
         orbitals_full = self._reconstruct_full_orbitals(
-            eigenvectors, self.grid.N_grid, self.config.boundary
+            eigenvectors,
+            self.grid.N_grid,
+            self.config.boundary,
+            self.config.kpt_reduced,
+            self.config.L,
         )
         densities_full = np.abs(orbitals_full) ** 2
 

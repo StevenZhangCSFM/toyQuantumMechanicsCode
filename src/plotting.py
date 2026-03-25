@@ -40,12 +40,14 @@ def plot_potential_and_orbitals(
 
     orbital_colors: list[str] = []
     for idx in range(orbitals.shape[1]):
+        y = np.real(orbitals[:, idx]) if np.iscomplexobj(orbitals) else orbitals[:, idx]
+        label = f"Re(Orbital {idx + 1})" if boundary == "bloch" else f"Orbital {idx + 1}"
         (line,) = ax_orb.plot(
             x,
-            orbitals[:, idx],
+            y,
             linestyle="--",
             linewidth=1.6,
-            label=f"Orbital {idx + 1}",
+            label=label,
         )
         orbital_colors.append(line.get_color())
 
@@ -55,7 +57,7 @@ def plot_potential_and_orbitals(
         ax_spec.plot(eig, 0.95, marker="o", markersize=4, color=color)
 
     ax_pot.set_ylabel("Potential energy (Hartree)", color="red")
-    ax_orb.set_ylabel("Orbital value")
+    ax_orb.set_ylabel("Re(orbital value)" if boundary == "bloch" else "Orbital value")
     ax_pot.set_title(output_pdf)
     ax_pot.tick_params(axis="y", labelcolor="red")
     ax_pot.grid(True, alpha=0.3)

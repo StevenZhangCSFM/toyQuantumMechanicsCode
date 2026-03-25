@@ -26,7 +26,6 @@ This code is intentionally small and simplified. Current limits include:
 - **stationary** Schrödinger equation only
 - intended for learning and experimentation rather than research-scale calculations
 - potential input is limited to the syntax and allowed names implemented in the source code
-- `bloch` appears in the CLI choices but is **not developed yet**
 
 ## Code structure
 
@@ -139,4 +138,3 @@ Use `--show_plot` if you also want the plot window to appear interactively.
 
 - The user-input run requires `--potential_expr` unless you are using `--test_zero` or `--test_harmonic`.
 - The computational interval is built from `L` on a symmetric grid from `-L/2` to `L/2`.
-- Some boundary-condition-related interface options are present for experimentation, but only the currently implemented features in the source code should be treated as supported.
