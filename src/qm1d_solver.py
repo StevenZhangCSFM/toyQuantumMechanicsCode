@@ -43,6 +43,7 @@ class QM1DConfig:
     potential_expr: str
     boundary: str = "dirichlet"
     kpt: float = 0.0
+    relative_kpt: Optional[float] = None
     kpt_reduced: float = 0.0
     parameters: Dict[str, float] = field(default_factory=dict)
     tol: float = 1e-10
@@ -78,7 +79,13 @@ class QM1DSolver:
     def __init__(self, config: QM1DConfig):
         self.config = config
         self._validate_basic_input(config)
-        config.kpt_reduced = self._reduce_k_to_first_bz(config.kpt, config.L)
+        if config.relative_kpt is not None:
+            config.kpt = float(config.relative_kpt) * (2.0 * np.pi / config.L)
+        config.kpt_reduced = self._reduce_k_to_first_bz(
+            config.kpt,
+            config.L,
+            config.relative_kpt,
+        )
 
         self.grid = self._make_grid(config.L, config.h_target, config.boundary)
         self._validate_grid_vs_fd_order(self.grid, config.fd_order, config.n_states)
@@ -121,16 +128,29 @@ class QM1DSolver:
             raise QM1DError("n_states must be at least 1.")
         if config.boundary not in ("dirichlet", "periodic", "bloch"):
             raise QM1DError("boundary must be one of: dirichlet, periodic, bloch.")
-        if config.boundary != "bloch" and abs(config.kpt) > 0.0:
-            raise QM1DError("kpt may only be provided when boundary='bloch'.")
+        if config.boundary != "bloch":
+            if abs(config.kpt) > 0.0:
+                raise QM1DError("kpt may only be provided when boundary='bloch'.")
+            if config.relative_kpt is not None:
+                raise QM1DError("relative_kpt may only be provided when boundary='bloch'.")
+        if config.boundary == "bloch" and config.relative_kpt is not None and abs(config.kpt) > 0.0:
+            raise QM1DError("Provide at most one of kpt and relative_kpt.")
         if not np.isfinite(config.kpt):
             raise QM1DError("kpt must be finite.")
+        if config.relative_kpt is not None and not np.isfinite(config.relative_kpt):
+            raise QM1DError("relative_kpt must be finite.")
         if not config.potential_expr or not config.potential_expr.strip():
             raise QM1DError("potential_expr must be a non-empty string.")
 
     @staticmethod
-    def _reduce_k_to_first_bz(kpt: float, L: float) -> float:
+    def _reduce_k_to_first_bz(
+        kpt: float,
+        L: float,
+        relative_kpt: Optional[float] = None,
+    ) -> float:
         G = 2.0 * np.pi / L
+        if relative_kpt is not None:
+            kpt = float(relative_kpt) * G
         k_reduced = float(kpt) % G
         if k_reduced > 0.5 * G:
             k_reduced -= G

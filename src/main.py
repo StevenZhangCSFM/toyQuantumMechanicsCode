@@ -60,6 +60,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Scalar Bloch wavevector in 1/Bohr. Used only when --boundary bloch. This is NOT the relative kpt in the first Brillouin zone!",
     )
     parser.add_argument(
+        "--relative_kpt",
+        type=float,
+        help=(
+            "Relative Bloch k-point coordinate without unit. Used only when "
+            "--boundary bloch. The real wavevector is "
+            "relative_kpt * (2*pi/L)."
+        ),
+    )
+    parser.add_argument(
         "--show_plot",
         action="store_true",
         help="Display the plot window in addition to saving the PDF.",
@@ -86,6 +95,7 @@ def make_default_config() -> QM1DConfig:
         potential_expr="",
         boundary="dirichlet",
         kpt=0.0,
+        relative_kpt=None,
         parameters={},
         tol=1e-12,
     )
@@ -127,6 +137,8 @@ def make_user_input_config(args: argparse.Namespace) -> QM1DConfig:
         config.boundary = args.boundary
     if args.kpt is not None:
         config.kpt = args.kpt
+    if args.relative_kpt is not None:
+        config.relative_kpt = args.relative_kpt
 
     return config
 
@@ -153,6 +165,8 @@ def print_summary(result: QM1DResult) -> None:
     print(f"potential_expr  = {result.config.potential_expr}")
     print(f"boundary        = {result.config.boundary}")
     if result.config.boundary == "bloch":
+        if getattr(result.config, "relative_kpt", None) is not None:
+            print(f"relative_kpt    = {result.config.relative_kpt:.14f}")
         print(f"kpt_input       = {result.config.kpt:.14f} 1/Bohr")
         print(f"kpt_reduced     = {result.config.kpt_reduced:.14f} 1/Bohr")
         print(f"-kpt_reduced    = {-result.config.kpt_reduced:.14f} 1/Bohr")
