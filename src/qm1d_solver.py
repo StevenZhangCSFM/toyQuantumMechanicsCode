@@ -1,66 +1,14 @@
 from __future__ import annotations
 
-import ast
 import math
-from dataclasses import dataclass, field
-from typing import Callable, Dict, Optional
+from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 from scipy.sparse.linalg import eigsh
 
 from hamiltonian import Hamiltonian
-
-
-_ALLOWED_MATH_FUNCS = {
-    "exp": np.exp,
-    "sqrt": np.sqrt,
-    "log": np.log,
-    "sin": np.sin,
-    "cos": np.cos,
-    "tan": np.tan,
-    "sinh": np.sinh,
-    "cosh": np.cosh,
-    "tanh": np.tanh,
-    "abs": np.abs,
-    "pi": np.pi,
-}
-
-
-@dataclass
-class QM1DConfig:
-    """
-    Configuration for the 1D stationary Schrodinger solver.
-
-    Units:
-    - Length: Bohr
-    - Energy / potential: Hartree
-    """
-
-    L: float
-    h_target: float
-    fd_order: int
-    n_states: int
-    potential_expr: str
-    boundary: str = "dirichlet"
-    kpt: float = 0.0
-    relative_kpt: Optional[float] = None
-    kpt_reduced: float = 0.0
-    num_electrons: int = 1
-    spin_symmetry: Optional[str] = None
-    interaction_softening: float = 1.0
-    parameters: Dict[str, float] = field(default_factory=dict)
-    tol: float = 1e-10
-    maxiter: Optional[int] = None
-    ncv: Optional[int] = None
-
-
-@dataclass
-class Grid1D:
-    N_grid: int
-    N_interior: int
-    h: float
-    x_full: np.ndarray
-    x_interior: np.ndarray
+from qm1d_setup import Grid1D, PreparedInputs, QM1DConfig, QM1DError, prepare_solver_inputs
 
 
 @dataclass
@@ -73,229 +21,37 @@ class QM1DResult:
     V_full: np.ndarray
     V_interior: np.ndarray
     one_particle_densities_full: Optional[np.ndarray] = None
+    kpt_reduced: float = 0.0
 
     @property
     def orbitals_full(self) -> np.ndarray:
         return self.wavefunctions_full
 
 
-class QM1DError(ValueError):
-    pass
-
-
 class QM1DSolver:
-    def __init__(self, config: QM1DConfig):
-        self.config = config
-        self._validate_basic_input(config)
-        if config.relative_kpt is not None:
-            config.kpt = float(config.relative_kpt) * (2.0 * np.pi / config.L)
-        config.kpt_reduced = self._reduce_k_to_first_bz(
-            config.kpt,
-            config.L,
-            config.relative_kpt,
-        )
-
-        self.grid = self._make_grid(config.L, config.h_target, config.boundary)
-        self._validate_grid_vs_fd_order(self.grid, config.fd_order, config.n_states, config)
-
-        self._validate_potential_expression(
-            expr=config.potential_expr,
-            params=config.parameters,
-        )
-        self.potential_fn = self._build_potential_function(
-            expr=config.potential_expr,
-            params=config.parameters,
-        )
-        self.V_full = self._evaluate_potential_on_grid(self.potential_fn, self.grid.x_full)
-        self._validate_potential_values(self.V_full)
-        self._warn_if_nonperiodic_bloch_potential()
-        if config.boundary == "dirichlet":
-            self.V_interior = self.V_full[1:-1].copy()
-        else:
-            self.V_interior = self.V_full[:-1].copy()
+    def __init__(self, prepared: PreparedInputs):
+        self.prepared = prepared
+        self.config = prepared.config
+        self.grid = prepared.grid
+        self.potential_fn = prepared.potential_fn
+        self.V_full = prepared.V_full
+        self.V_interior = prepared.V_interior
+        self.kpt_reduced = prepared.kpt_reduced
+        self.effective_spin_symmetry = prepared.effective_spin_symmetry
 
         self.hamiltonian = Hamiltonian(
             N_grid=self.grid.N_grid,
             h=self.grid.h,
-            fd_order=config.fd_order,
+            fd_order=self.config.fd_order,
             V_interior=self.V_interior,
-            boundary=config.boundary,
-            kpt=config.kpt_reduced,
-            num_electrons=config.num_electrons,
+            boundary=self.config.boundary,
+            kpt=self.kpt_reduced,
+            num_electrons=self.config.num_electrons,
             x_interior=self.grid.x_interior,
-            interaction_softening=config.interaction_softening,
-            spin_symmetry=config.spin_symmetry or "singlet",
+            interaction_softening=self.config.interaction_softening,
+            spin_symmetry=self.effective_spin_symmetry,
         )
         self.operator = self.hamiltonian.make_operator()
-
-    @staticmethod
-    def _validate_basic_input(config: QM1DConfig) -> None:
-        if not (0.0 < config.L <= 50.0):
-            raise QM1DError("L must be in (0, 50].")
-        if config.h_target <= 0.0:
-            raise QM1DError("h_target must be positive.")
-        if config.fd_order not in (2, 4, 6, 8, 10):
-            raise QM1DError("fd_order must be one of 2, 4, 6, 8, 10.")
-        if config.n_states < 1:
-            raise QM1DError("n_states must be at least 1.")
-        if config.boundary not in ("dirichlet", "periodic", "bloch"):
-            raise QM1DError("boundary must be one of: dirichlet, periodic, bloch.")
-        if config.num_electrons not in (1, 2):
-            raise QM1DError("num_electrons must be 1 or 2.")
-        if config.num_electrons == 2 and config.boundary != "dirichlet":
-            raise QM1DError("The exact two-electron solver currently supports boundary='dirichlet' only.")
-        if config.num_electrons == 2:
-            if config.spin_symmetry not in ("singlet", "triplet"):
-                raise QM1DError("For num_electrons=2, spin_symmetry must be 'singlet' or 'triplet'.")
-            if abs(config.kpt) > 0.0 or config.relative_kpt is not None:
-                raise QM1DError("kpt and relative_kpt are not supported for num_electrons=2.")
-            if config.interaction_softening <= 0.0:
-                raise QM1DError("interaction_softening must be positive.")
-        else:
-            if config.spin_symmetry is not None:
-                raise QM1DError("spin_symmetry is only supported when num_electrons=2.")
-            if config.boundary != "bloch":
-                if abs(config.kpt) > 0.0:
-                    raise QM1DError("kpt may only be provided when boundary='bloch'.")
-                if config.relative_kpt is not None:
-                    raise QM1DError("relative_kpt may only be provided when boundary='bloch'.")
-            if config.boundary == "bloch" and config.relative_kpt is not None and abs(config.kpt) > 0.0:
-                raise QM1DError("Provide at most one of kpt and relative_kpt.")
-        if not np.isfinite(config.kpt):
-            raise QM1DError("kpt must be finite.")
-        if config.relative_kpt is not None and not np.isfinite(config.relative_kpt):
-            raise QM1DError("relative_kpt must be finite.")
-        if not config.potential_expr or not config.potential_expr.strip():
-            raise QM1DError("potential_expr must be a non-empty string.")
-
-    @staticmethod
-    def _reduce_k_to_first_bz(
-        kpt: float,
-        L: float,
-        relative_kpt: Optional[float] = None,
-    ) -> float:
-        G = 2.0 * np.pi / L
-        if relative_kpt is not None:
-            kpt = float(relative_kpt) * G
-        k_reduced = float(kpt) % G
-        if k_reduced > 0.5 * G:
-            k_reduced -= G
-        upper_edge = np.pi / L
-        if np.isclose(k_reduced, upper_edge, atol=1e-14, rtol=0.0):
-            k_reduced = -upper_edge
-        return float(k_reduced)
-
-    @staticmethod
-    def _make_grid(L: float, h_target: float, boundary: str = "dirichlet") -> Grid1D:
-        N_grid = int(round(L / h_target)) + 1
-        N_grid = max(N_grid, 3)
-
-        h = L / (N_grid - 1)
-        x_full = np.linspace(-0.5 * L, 0.5 * L, N_grid, dtype=float)
-        if boundary in ("periodic", "bloch"):
-            x_interior = x_full[:-1].copy()
-            N_interior = N_grid - 1
-        else:
-            x_interior = x_full[1:-1].copy()
-            N_interior = N_grid - 2
-
-        return Grid1D(
-            N_grid=N_grid,
-            N_interior=N_interior,
-            h=h,
-            x_full=x_full,
-            x_interior=x_interior,
-        )
-
-    @staticmethod
-    def _validate_grid_vs_fd_order(
-        grid: Grid1D,
-        fd_order: int,
-        n_states: int,
-        config: QM1DConfig,
-    ) -> None:
-        p = fd_order // 2
-        if grid.N_interior < 2 * p + 1:
-            raise QM1DError(
-                f"Grid too small for fd_order={fd_order}. "
-                f"Need at least {2 * p + 1} interior points, got {grid.N_interior}."
-            )
-
-        if config.num_electrons == 1:
-            dim = grid.N_interior
-        elif config.spin_symmetry == "triplet":
-            dim = grid.N_interior * (grid.N_interior - 1) // 2
-        else:
-            dim = grid.N_interior * (grid.N_interior + 1) // 2
-
-        if n_states >= dim:
-            raise QM1DError(
-                f"n_states must be smaller than the accessible Hilbert-space dimension ({dim})."
-            )
-
-    @staticmethod
-    def _validate_potential_expression(
-        expr: str, params: Optional[Dict[str, float]] = None
-    ) -> None:
-        params = dict(params or {})
-        allowed_names = {"x", *(_ALLOWED_MATH_FUNCS.keys()), *(params.keys())}
-
-        try:
-            tree = ast.parse(expr, mode="eval")
-        except SyntaxError as exc:
-            raise QM1DError(f"Invalid potential expression syntax: {exc.msg}.") from exc
-
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Name) and node.id not in allowed_names:
-                raise ValueError(
-                    "Invalid symbol in potential_expr: "
-                    f"'{node.id}'. Only 'x', parameter names, and allowed math names "
-                    f"{sorted(_ALLOWED_MATH_FUNCS.keys())} are permitted."
-                )
-
-    @staticmethod
-    def _build_potential_function(
-        expr: str, params: Optional[Dict[str, float]] = None
-    ) -> Callable[[np.ndarray], np.ndarray]:
-        params = dict(params or {})
-        namespace = dict(_ALLOWED_MATH_FUNCS)
-        namespace.update(params)
-
-        code = compile(expr, "<potential_expr>", "eval")
-
-        def V(x: np.ndarray | float) -> np.ndarray:
-            local_ns = dict(namespace)
-            local_ns["x"] = x
-            return eval(code, {"__builtins__": {}}, local_ns)
-
-        return V
-
-    @staticmethod
-    def _evaluate_potential_on_grid(
-        V: Callable[[np.ndarray], np.ndarray], x_full: np.ndarray
-    ) -> np.ndarray:
-        values = np.asarray(V(x_full), dtype=float)
-        if values.shape != x_full.shape:
-            raise QM1DError(
-                f"Potential evaluation returned shape {values.shape}, expected {x_full.shape}."
-            )
-        return values
-
-    @staticmethod
-    def _validate_potential_values(V_full: np.ndarray) -> None:
-        if not np.all(np.isfinite(V_full)):
-            raise QM1DError("Potential contains NaN or Inf on the grid.")
-        if np.iscomplexobj(V_full):
-            raise QM1DError("Potential must be real-valued.")
-
-    def _warn_if_nonperiodic_bloch_potential(self) -> None:
-        if self.config.boundary != "bloch":
-            return
-        if not np.isclose(self.V_full[0], self.V_full[-1], atol=1e-10, rtol=1e-8):
-            print(
-                "Warning: boundary='bloch' assumes a periodic potential over the cell, "
-                "but V(-L/2) and V(L/2) differ on the current grid."
-            )
 
     @staticmethod
     def _normalize_eigenvectors(eigenvectors: np.ndarray, h: float) -> np.ndarray:
@@ -433,7 +189,7 @@ class QM1DSolver:
             eigenvectors,
             self.grid.N_grid,
             self.config.boundary,
-            self.config.kpt_reduced,
+            self.kpt_reduced,
             self.config.L,
         )
         densities_full = np.abs(wavefunctions_full) ** 2
@@ -446,6 +202,7 @@ class QM1DSolver:
             densities_full=densities_full,
             V_full=self.V_full,
             V_interior=self.V_interior,
+            kpt_reduced=self.kpt_reduced,
         )
 
     def _solve_two_electron_exact(self) -> QM1DResult:
@@ -460,10 +217,10 @@ class QM1DSolver:
 
         v0 = self.hamiltonian.restrict_matrix_to_reduced_vector(
             self._project_exchange_symmetry(
-                self._build_initial_vector_for_two_electron(self.grid, self.config.spin_symmetry or "singlet").reshape(
+                self._build_initial_vector_for_two_electron(self.grid, self.effective_spin_symmetry).reshape(
                     self.grid.N_interior, self.grid.N_interior
                 ),
-                self.config.spin_symmetry or "singlet",
+                self.effective_spin_symmetry,
             )
         )
         eigenvalues, eigenvectors = eigsh(
@@ -483,12 +240,12 @@ class QM1DSolver:
         wavefunctions_interior = np.zeros((self.grid.N_interior, self.grid.N_interior, n_states), dtype=float)
         for s in range(n_states):
             psi = self.hamiltonian.expand_reduced_vector_to_matrix(eigenvectors[:, s])
-            psi = self._project_exchange_symmetry(psi, self.config.spin_symmetry or "singlet")
+            psi = self._project_exchange_symmetry(psi, self.effective_spin_symmetry)
             wavefunctions_interior[:, :, s] = psi
 
         wavefunctions_interior = self._normalize_two_electron_wavefunctions(wavefunctions_interior, self.grid.h)
         for s in range(n_states):
-            self._check_exchange_symmetry(wavefunctions_interior[:, :, s], self.config.spin_symmetry or "singlet")
+            self._check_exchange_symmetry(wavefunctions_interior[:, :, s], self.effective_spin_symmetry)
 
         wavefunctions_full = self._reconstruct_full_two_electron_wavefunctions(
             wavefunctions_interior,
@@ -510,6 +267,7 @@ class QM1DSolver:
             V_full=self.V_full,
             V_interior=self.V_interior,
             one_particle_densities_full=one_particle_densities_full,
+            kpt_reduced=self.kpt_reduced,
         )
 
     def solve(self) -> QM1DResult:
@@ -520,5 +278,6 @@ class QM1DSolver:
 
 
 def solve_qm1d(config: QM1DConfig) -> QM1DResult:
-    solver = QM1DSolver(config)
+    prepared = prepare_solver_inputs(config)
+    solver = QM1DSolver(prepared)
     return solver.solve()

@@ -5,7 +5,8 @@ import argparse
 import numpy as np
 
 from plotting import plot_potential_and_orbitals
-from qm1d_solver import QM1DConfig, QM1DResult, solve_qm1d
+from qm1d_setup import QM1DConfig
+from qm1d_solver import QM1DResult, solve_qm1d
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -167,8 +168,8 @@ def print_summary(result: QM1DResult) -> None:
         if result.config.relative_kpt is not None:
             print(f"relative_kpt    = {result.config.relative_kpt:.14f}")
         print(f"kpt_input       = {result.config.kpt:.14f} 1/Bohr")
-        print(f"kpt_reduced     = {result.config.kpt_reduced:.14f} 1/Bohr")
-        print(f"-kpt_reduced    = {-result.config.kpt_reduced:.14f} 1/Bohr")
+        print(f"kpt_reduced     = {result.kpt_reduced:.14f} 1/Bohr")
+        print(f"-kpt_reduced    = {-result.kpt_reduced:.14f} 1/Bohr")
     print("Eigenvalues (Hartree):")
     for i, ev in enumerate(result.eigenvalues, start=1):
         print(f"  state {i:2d}: {ev:.14f}")
