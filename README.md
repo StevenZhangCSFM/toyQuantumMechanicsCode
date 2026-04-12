@@ -10,22 +10,65 @@ The code uses the **atomic unit system**:
 - length: **Bohr**
 - energy and potential: **Hartree**
 
-## Current functionality
+## Current functionality and limits
 
-The current code can:
-- solve 1D stationary eigenvalue problems for a user-supplied potential
-- compute several low-lying eigenvalues and eigenstates
-- plot the potential, orbitals, and eigenvalue spectrum
-- save the plot to a PDF file
+This code is intentionally small and simplified. It is designed specifically for **1D stationary Schrödinger problems** and currently supports the following two solver modes.
 
-## Current limits
+### One-electron feature
 
-This code is intentionally small and simplified. Current limits include:
+The one-electron solver handles a single particle in a user-supplied 1D external potential. It computes several low-lying eigenvalues and eigenstates on a finite-difference real-space grid, and it can generate a PDF plot of the potential, orbitals, and eigenvalue spectrum.
 
-- **1D only**
-- **stationary** Schrödinger equation only
-- intended for learning and experimentation rather than research-scale calculations
-- potential input is limited to the syntax and allowed names implemented in the source code
+Supported boundary conditions for the one-electron solver:
+- `dirichlet`
+- `periodic`
+- `bloch`
+
+For Bloch calculations, you may specify either:
+- `--kpt` in units of 1/Bohr, or
+- `--relative_kpt`, where the physical wavevector is `relative_kpt * (2*pi/L)`
+
+Example:
+
+```bash
+python main.py --potential_expr "sin(x*2*pi/12)" --n_states 12 --L 12.0 --h_target 0.05 --boundary bloch --relative_kpt 0.25
+```
+
+Current one-electron limits:
+- only the stationary Schrödinger equation is supported
+- the potential must be given through the implemented expression parser and allowed names
+
+### Two-electron feature
+
+The two-electron solver is an **exact grid-based solver for two interacting electrons in 1D**. It works with a spatial two-electron wavefunction
+`Ψ(x₁, x₂)` and solves the Hamiltonian consisting of:
+- kinetic energy of electron 1
+- kinetic energy of electron 2
+- the external one-body potential acting on each electron
+- a softened electron-electron interaction
+
+The electron-electron repulsion is modeled as:
+
+```text
+1 / sqrt((x1 - x2)^2 + a^2)
+```
+
+where `a` is the softening parameter set by `--interaction_softening`.
+
+The two-electron solver supports two exchange-symmetry sectors through `--spin_symmetry`:
+- `singlet`: spatial wavefunction is symmetric
+- `triplet`: spatial wavefunction is antisymmetric
+
+Example:
+
+```bash
+python main.py --potential_expr "0.5*x**2" --num_electrons 2 --spin_symmetry triplet --interaction_softening 1.0
+```
+
+Current two-electron limits:
+- only `boundary=dirichlet` is currently implemented for the exact two-electron solver
+- only `num_electrons = 2` is supported in this mode
+- `spin_symmetry` must be provided as `singlet` or `triplet`
+- Bloch and periodic boundary conditions are not currently supported in the exact two-electron solver
 
 ## Code structure
 
@@ -108,7 +151,7 @@ python main.py --help
 You can also read the argument definitions directly in:
 - `main.py` for CLI flags and defaults
 
-## Potential expression input
+### Potential expression input
 
 The potential is provided as a Python-style expression string through `--potential_expr`.
 
@@ -130,7 +173,8 @@ A typical run produces:
 - a terminal summary of the numerical setup
 - eigenvalues printed in **Hartree**
 - for built-in tests, a comparison against the corresponding reference energies
-- a PDF plot containing the potential, orbitals, and eigenvalue spectrum
+- for one-electron runs, a PDF figure containing the potential, wavefunctions, and eigenvalue spectrum
+- for two-electron runs, a PDF figure containing a two-particle density heat map, one-particle densities, and the eigenvalue spectrum
 
 Use `--show_plot` if you also want the plot window to appear interactively.
 
