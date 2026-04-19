@@ -36,6 +36,49 @@ class HamiltonianBase(ABC):
         return coeffs
 
 
+def build_soft_coulomb_matrix(x_interior: np.ndarray, interaction_softening: float) -> np.ndarray:
+    x_interior = np.asarray(x_interior, dtype=float)
+    if interaction_softening <= 0.0:
+        raise ValueError("interaction_softening must be positive.")
+    dx = x_interior[:, None] - x_interior[None, :]
+    return 1.0 / np.sqrt(dx * dx + interaction_softening * interaction_softening)
+
+
+def compute_hartree_potential_from_density(density: np.ndarray, kernel: np.ndarray, h: float) -> np.ndarray:
+    density = np.asarray(density, dtype=float)
+    return h * (kernel @ density)
+
+
+def apply_exchange_operator_to_orbital(
+    psi: np.ndarray,
+    occupied_orbitals: np.ndarray,
+    kernel: np.ndarray,
+    h: float,
+    orbital_occupations: np.ndarray,
+    spin_symmetry: str,
+) -> np.ndarray:
+    psi = np.asarray(psi)
+    occupied_orbitals = np.asarray(occupied_orbitals)
+    orbital_occupations = np.asarray(orbital_occupations, dtype=float)
+    result = np.zeros_like(psi, dtype=psi.dtype)
+
+    if spin_symmetry == "singlet":
+        if occupied_orbitals.shape[1] == 0:
+            return result
+        phi = occupied_orbitals[:, 0]
+        projection = h * (kernel @ (np.conjugate(phi) * psi))
+        result = phi * projection
+        return result
+
+    for idx, phi in enumerate(occupied_orbitals.T):
+        occ = orbital_occupations[idx] if idx < len(orbital_occupations) else 1.0
+        if occ <= 0.0:
+            continue
+        projection = h * (kernel @ (np.conjugate(phi) * psi))
+        result += occ * phi * projection
+    return result
+
+
 class OneElectronHamiltonianBase(HamiltonianBase):
     operator_dtype = np.float64
 
@@ -163,6 +206,70 @@ class OneElectronBlochHamiltonian(OneElectronHamiltonianBase):
         return complex(u[j_mapped] * phase)
 
 
+class OneElectronHFHamiltonian(HamiltonianBase):
+    operator_dtype = np.float64
+
+    def __init__(
+        self,
+        N_grid: int,
+        h: float,
+        fd_order: int,
+        V_interior: np.ndarray,
+        x_interior: np.ndarray,
+        interaction_softening: float,
+        occupied_orbitals: np.ndarray,
+        orbital_occupations: np.ndarray,
+        spin_symmetry: str,
+    ):
+        self.core = OneElectronDirichletHamiltonian(
+            N_grid=N_grid,
+            h=h,
+            fd_order=fd_order,
+            V_interior=V_interior,
+        )
+        self.N_interior = self.core.N_interior
+        self.h = self.core.h
+        self.V_interior = np.asarray(V_interior, dtype=float)
+        self.occupied_orbitals = np.asarray(occupied_orbitals, dtype=float)
+        self.orbital_occupations = np.asarray(orbital_occupations, dtype=float)
+        self.spin_symmetry = str(spin_symmetry)
+        self.kernel = build_soft_coulomb_matrix(np.asarray(x_interior, dtype=float), interaction_softening)
+
+        density = np.zeros(self.N_interior, dtype=float)
+        for occ, phi in zip(self.orbital_occupations, self.occupied_orbitals.T):
+            density += occ * np.abs(phi) ** 2
+        self.hartree_potential = compute_hartree_potential_from_density(density, self.kernel, self.h)
+
+    def make_operator(self) -> LinearOperator:
+        def matvec(u: np.ndarray) -> np.ndarray:
+            return self._apply_hamiltonian(np.asarray(u, dtype=self.operator_dtype))
+
+        return LinearOperator(
+            shape=(self.N_interior, self.N_interior),
+            matvec=matvec,
+            dtype=self.operator_dtype,
+        )
+
+    def apply_kinetic_only(self, u: np.ndarray) -> np.ndarray:
+        return self.core.apply_kinetic_only(u)
+
+    def apply_hartree_only(self, u: np.ndarray) -> np.ndarray:
+        return self.hartree_potential * u
+
+    def apply_exchange_only(self, u: np.ndarray) -> np.ndarray:
+        return apply_exchange_operator_to_orbital(
+            psi=u,
+            occupied_orbitals=self.occupied_orbitals,
+            kernel=self.kernel,
+            h=self.h,
+            orbital_occupations=self.orbital_occupations,
+            spin_symmetry=self.spin_symmetry,
+        )
+
+    def _apply_hamiltonian(self, u: np.ndarray) -> np.ndarray:
+        return self.apply_kinetic_only(u) + self.V_interior * u + self.apply_hartree_only(u) - self.apply_exchange_only(u)
+
+
 class ManyElectronHamiltonianBase(HamiltonianBase):
     operator_dtype = np.float64
 
@@ -273,8 +380,6 @@ class TwoElectronDirichletHamiltonian(ManyElectronHamiltonianBase):
         for idx, (i, j) in enumerate(self._basis_pairs):
             if i == j:
                 u[idx] = psi[i, j]
-            elif self.spin_symmetry == "singlet":
-                u[idx] = sqrt2 * psi[i, j]
             else:
                 u[idx] = sqrt2 * psi[i, j]
         return u
@@ -307,9 +412,31 @@ class Hamiltonian:
         x_interior: np.ndarray | None = None,
         interaction_softening: float = 1.0,
         spin_symmetry: str = "singlet",
+        many_body_method: str | None = None,
+        occupied_orbitals: np.ndarray | None = None,
+        orbital_occupations: np.ndarray | None = None,
     ):
         boundary = str(boundary)
         num_electrons = int(num_electrons)
+
+        if many_body_method == "HF":
+            if boundary != "dirichlet":
+                raise ValueError("HF solver currently supports boundary='dirichlet' only.")
+            if x_interior is None:
+                raise ValueError("x_interior is required for HF Hamiltonian.")
+            if occupied_orbitals is None or orbital_occupations is None:
+                raise ValueError("occupied_orbitals and orbital_occupations are required for HF Hamiltonian.")
+            return OneElectronHFHamiltonian(
+                N_grid=N_grid,
+                h=h,
+                fd_order=fd_order,
+                V_interior=V_interior,
+                x_interior=x_interior,
+                interaction_softening=interaction_softening,
+                occupied_orbitals=occupied_orbitals,
+                orbital_occupations=orbital_occupations,
+                spin_symmetry=spin_symmetry,
+            )
 
         if num_electrons == 1:
             if boundary == "dirichlet":

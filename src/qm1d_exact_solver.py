@@ -1,36 +1,19 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
-from typing import Optional
+from typing import Any
 
 import numpy as np
 from scipy.sparse.linalg import eigsh
 
 from hamiltonian import Hamiltonian
-from qm1d_setup import Grid1D, PreparedInputs, QM1DConfig, QM1DError, prepare_solver_inputs
+from qm1d_setup import Grid1D, PreparedInputs, QM1DError, QM1DConfig
 
 
-@dataclass
-class QM1DResult:
-    config: QM1DConfig
-    grid: Grid1D
-    eigenvalues: np.ndarray
-    wavefunctions_full: np.ndarray
-    densities_full: np.ndarray
-    V_full: np.ndarray
-    V_interior: np.ndarray
-    one_particle_densities_full: Optional[np.ndarray] = None
-    kpt_reduced: float = 0.0
-
-    @property
-    def orbitals_full(self) -> np.ndarray:
-        return self.wavefunctions_full
-
-
-class QM1DSolver:
-    def __init__(self, prepared: PreparedInputs):
+class QM1DExactSolver:
+    def __init__(self, prepared: PreparedInputs, result_cls: type[Any]):
         self.prepared = prepared
+        self.result_cls = result_cls
         self.config = prepared.config
         self.grid = prepared.grid
         self.potential_fn = prepared.potential_fn
@@ -50,6 +33,7 @@ class QM1DSolver:
             x_interior=self.grid.x_interior,
             interaction_softening=self.config.interaction_softening,
             spin_symmetry=self.effective_spin_symmetry,
+            many_body_method=self.config.many_body_method,
         )
         self.operator = self.hamiltonian.make_operator()
 
@@ -161,7 +145,7 @@ class QM1DSolver:
                 f"Computed two-electron wavefunction violates the requested {spin_symmetry} symmetry (error={err:.3e})."
             )
 
-    def _solve_one_electron(self) -> QM1DResult:
+    def _solve_one_electron(self):
         n = self.grid.N_interior
         n_states = self.config.n_states
 
@@ -194,7 +178,7 @@ class QM1DSolver:
         )
         densities_full = np.abs(wavefunctions_full) ** 2
 
-        return QM1DResult(
+        return self.result_cls(
             config=self.config,
             grid=self.grid,
             eigenvalues=eigenvalues,
@@ -202,10 +186,11 @@ class QM1DSolver:
             densities_full=densities_full,
             V_full=self.V_full,
             V_interior=self.V_interior,
+            orbitals_full=wavefunctions_full,
             kpt_reduced=self.kpt_reduced,
         )
 
-    def _solve_two_electron_exact(self) -> QM1DResult:
+    def _solve_two_electron_exact(self):
         dim = self.hamiltonian.problem_size
         n_states = self.config.n_states
 
@@ -258,7 +243,7 @@ class QM1DSolver:
             self.grid.N_grid,
         )
 
-        return QM1DResult(
+        return self.result_cls(
             config=self.config,
             grid=self.grid,
             eigenvalues=eigenvalues,
@@ -267,17 +252,11 @@ class QM1DSolver:
             V_full=self.V_full,
             V_interior=self.V_interior,
             one_particle_densities_full=one_particle_densities_full,
+            total_density_full=one_particle_densities_full[:, 0] if one_particle_densities_full.shape[1] > 0 else None,
             kpt_reduced=self.kpt_reduced,
         )
 
-    def solve(self) -> QM1DResult:
+    def solve(self):
         if self.config.num_electrons == 1:
             return self._solve_one_electron()
         return self._solve_two_electron_exact()
-
-
-
-def solve_qm1d(config: QM1DConfig) -> QM1DResult:
-    prepared = prepare_solver_inputs(config)
-    solver = QM1DSolver(prepared)
-    return solver.solve()

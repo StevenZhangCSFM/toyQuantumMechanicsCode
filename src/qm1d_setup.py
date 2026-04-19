@@ -42,10 +42,14 @@ class QM1DConfig:
     num_electrons: int = 1
     spin_symmetry: Optional[str] = None
     interaction_softening: float = 1.0
+    many_body_method: Optional[str] = None
     parameters: Dict[str, float] = field(default_factory=dict)
     tol: float = 1e-10
     maxiter: Optional[int] = None
     ncv: Optional[int] = None
+    scf_tol: float = 1e-8
+    scf_max_iter: int = 100
+    scf_mixing: float = 0.3
 
 
 @dataclass
@@ -85,8 +89,17 @@ def validate_config(config: QM1DConfig) -> None:
         raise QM1DError("boundary must be one of: dirichlet, periodic, bloch.")
     if config.num_electrons not in (1, 2):
         raise QM1DError("num_electrons must be 1 or 2.")
-    if config.num_electrons == 2 and config.boundary != "dirichlet":
-        raise QM1DError("The exact two-electron solver currently supports boundary='dirichlet' only.")
+    if config.many_body_method not in (None, "HF", "DFT"):
+        raise QM1DError("many_body_method must be None, 'HF', or 'DFT'.")
+    if config.scf_tol <= 0.0:
+        raise QM1DError("scf_tol must be positive.")
+    if config.scf_max_iter < 1:
+        raise QM1DError("scf_max_iter must be at least 1.")
+    if not (0.0 < config.scf_mixing <= 1.0):
+        raise QM1DError("scf_mixing must be in (0, 1].")
+
+    if config.num_electrons == 2 and config.boundary != "dirichlet" and config.many_body_method in (None, "HF", "DFT"):
+        raise QM1DError("Two-electron solvers currently support boundary='dirichlet' only.")
 
     if config.num_electrons == 2:
         if config.spin_symmetry not in ("singlet", "triplet"):
@@ -98,6 +111,8 @@ def validate_config(config: QM1DConfig) -> None:
     else:
         if config.spin_symmetry is not None:
             raise QM1DError("spin_symmetry is only supported when num_electrons=2.")
+        if config.many_body_method is not None:
+            raise QM1DError("many_body_method is currently supported only when num_electrons=2.")
         if config.boundary != "bloch":
             if abs(config.kpt) > 0.0:
                 raise QM1DError("kpt may only be provided when boundary='bloch'.")
@@ -105,6 +120,12 @@ def validate_config(config: QM1DConfig) -> None:
                 raise QM1DError("relative_kpt may only be provided when boundary='bloch'.")
         if config.boundary == "bloch" and config.relative_kpt is not None and abs(config.kpt) > 0.0:
             raise QM1DError("Provide at most one of kpt and relative_kpt.")
+
+    if config.many_body_method in ("HF", "DFT"):
+        if config.num_electrons != 2:
+            raise QM1DError("HF/DFT modes currently require num_electrons=2.")
+        if config.boundary != "dirichlet":
+            raise QM1DError("HF/DFT modes currently require boundary='dirichlet'.")
 
     if not np.isfinite(config.kpt):
         raise QM1DError("kpt must be finite.")
@@ -166,7 +187,9 @@ def validate_grid_vs_fd_order(
             f"Need at least {2 * p + 1} interior points, got {grid.N_interior}."
         )
 
-    if config.num_electrons == 1:
+    if config.many_body_method in ("HF", "DFT"):
+        dim = grid.N_interior
+    elif config.num_electrons == 1:
         dim = grid.N_interior
     elif config.spin_symmetry == "triplet":
         dim = grid.N_interior * (grid.N_interior - 1) // 2
@@ -177,6 +200,9 @@ def validate_grid_vs_fd_order(
         raise QM1DError(
             f"n_states must be smaller than the accessible Hilbert-space dimension ({dim})."
         )
+
+    if config.many_body_method == "HF" and config.spin_symmetry == "triplet" and grid.N_interior < 2:
+        raise QM1DError("Triplet HF requires at least two one-electron basis functions.")
 
 
 def validate_potential_expression(

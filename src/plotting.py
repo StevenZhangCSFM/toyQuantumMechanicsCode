@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import matplotlib.pyplot as plt
 import numpy as np
 
-from qm1d_solver import QM1DResult
+if TYPE_CHECKING:
+    from main import QM1DResult
 
 
 class PlotterBase:
-    def plot(self, result: QM1DResult, output_pdf: str, show: bool = False) -> str:
+    def plot(self, result: 'QM1DResult', output_pdf: str, show: bool = False) -> str:
         raise NotImplementedError
 
     @staticmethod
@@ -22,7 +25,7 @@ class PlotterBase:
 
 
 class OneElectronPlotter(PlotterBase):
-    def plot(self, result: QM1DResult, output_pdf: str, show: bool = False) -> str:
+    def plot(self, result: 'QM1DResult', output_pdf: str, show: bool = False) -> str:
         x = result.grid.x_full
         V = result.V_full
         wavefunctions = result.wavefunctions_full
@@ -92,7 +95,7 @@ class OneElectronPlotter(PlotterBase):
 
 
 class TwoElectronPlotter(PlotterBase):
-    def plot(self, result: QM1DResult, output_pdf: str, show: bool = False) -> str:
+    def _plot_exact_two_electron(self, result: 'QM1DResult', output_pdf: str, show: bool) -> str:
         x = result.grid.x_full
         V = result.V_full
         densities_2d = result.densities_full
@@ -106,16 +109,10 @@ class TwoElectronPlotter(PlotterBase):
         ax_dens = fig.add_subplot(gs[0, 1])
         ax_spec = fig.add_subplot(gs[1, :])
 
-        state_idx = 0
-        heat = ax_heat.imshow(
-            densities_2d[:, :, state_idx].T,
-            origin="lower",
-            extent=[x[0], x[-1], x[0], x[-1]],
-            aspect="auto",
-        )
+        heat = ax_heat.imshow(densities_2d[:, :, 0].T, origin="lower", extent=[x[0], x[-1], x[0], x[-1]], aspect="auto")
         ax_heat.set_xlabel(r"$x_1$ (Bohr)")
         ax_heat.set_ylabel(r"$x_2$ (Bohr)")
-        ax_heat.set_title(rf"$|\Psi_{{{state_idx + 1}}}(x_1,x_2)|^2$")
+        ax_heat.set_title(r"$|\Psi_1(x_1,x_2)|^2$")
         fig.colorbar(heat, ax=ax_heat, fraction=0.046, pad=0.04)
 
         ax_pot = ax_dens.twinx()
@@ -155,10 +152,71 @@ class TwoElectronPlotter(PlotterBase):
         fig.suptitle(output_pdf)
         return self._finalize(fig, output_pdf, show)
 
+    def _plot_hf_two_electron(self, result: 'QM1DResult', output_pdf: str, show: bool) -> str:
+        x = result.grid.x_full
+        V = result.V_full
+        densities_2d = result.densities_full
+        total_density = result.total_density_full
+        orbital_energies = np.asarray(result.eigenvalues, dtype=float)
+
+        fig = plt.figure(figsize=(11, 8))
+        gs = fig.add_gridspec(nrows=2, ncols=2, height_ratios=[4.0, 1.0], width_ratios=[1.15, 1.0], hspace=0.2, wspace=0.28)
+
+        ax_heat = fig.add_subplot(gs[0, 0])
+        ax_dens = fig.add_subplot(gs[0, 1])
+        ax_spec = fig.add_subplot(gs[1, :])
+
+        heat = ax_heat.imshow(densities_2d[:, :, 0].T, origin="lower", extent=[x[0], x[-1], x[0], x[-1]], aspect="auto")
+        ax_heat.set_xlabel(r"$x_1$ (Bohr)")
+        ax_heat.set_ylabel(r"$x_2$ (Bohr)")
+        ax_heat.set_title(r"$|\Psi_{HF}(x_1,x_2)|^2$")
+        fig.colorbar(heat, ax=ax_heat, fraction=0.046, pad=0.04)
+
+        ax_pot = ax_dens.twinx()
+        density_colors: list[str] = []
+        if total_density is not None:
+            (line,) = ax_dens.plot(x, total_density, linewidth=1.8, label="Total density")
+            density_colors.append(line.get_color())
+        ax_pot.plot(x, V, color="red", linewidth=2.2, label="Potential V(x)")
+        ax_dens.set_xlabel("x (Bohr)")
+        ax_dens.set_ylabel("Total electron density")
+        ax_pot.set_ylabel("Potential energy (Hartree)", color="red")
+        ax_pot.tick_params(axis="y", labelcolor="red")
+        ax_dens.grid(True, alpha=0.3)
+        ax_dens.set_title("Total electron density and potential")
+
+        for idx, eig in enumerate(orbital_energies):
+            color = density_colors[0] if density_colors else None
+            ax_spec.vlines(eig, 0.2, 0.95, linewidth=2.0, color=color)
+            ax_spec.plot(eig, 0.95, marker="o", markersize=4, color=color)
+        ax_spec.set_xlabel("Orbital energy (Hartree)")
+        ax_spec.set_yticks([])
+        ax_spec.set_ylim(0.0, 1.1)
+        ax_spec.grid(True, axis="x", alpha=0.3)
+        ax_spec.spines["left"].set_visible(False)
+        ax_spec.spines["right"].set_visible(False)
+        ax_spec.spines["top"].set_visible(False)
+        if orbital_energies.size > 0:
+            e_min = float(np.min(orbital_energies))
+            e_max = float(np.max(orbital_energies))
+            pad = max(1.0, 0.05 * max(abs(e_min), 1.0)) if np.isclose(e_min, e_max) else 0.08 * (e_max - e_min)
+            ax_spec.set_xlim(e_min - pad, e_max + pad)
+
+        handles_dens, labels_dens = ax_dens.get_legend_handles_labels()
+        handles_pot, labels_pot = ax_pot.get_legend_handles_labels()
+        ax_dens.legend(handles_dens + handles_pot, labels_dens + labels_pot, loc="best")
+        fig.suptitle(output_pdf)
+        return self._finalize(fig, output_pdf, show)
+
+    def plot(self, result: 'QM1DResult', output_pdf: str, show: bool = False) -> str:
+        if result.many_body_method == "HF":
+            return self._plot_hf_two_electron(result, output_pdf, show)
+        return self._plot_exact_two_electron(result, output_pdf, show)
+
 
 
 def plot_result(
-    result: QM1DResult,
+    result: 'QM1DResult',
     output_pdf: str = "user_input_potential_orbitals.pdf",
     show: bool = False,
 ) -> str:
@@ -168,7 +226,7 @@ def plot_result(
 
 # Backward-compatible name used by main.py.
 def plot_potential_and_orbitals(
-    result: QM1DResult,
+    result: 'QM1DResult',
     output_pdf: str = "user_input_potential_orbitals.pdf",
     show: bool = False,
 ) -> str:

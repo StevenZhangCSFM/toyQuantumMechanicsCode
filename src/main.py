@@ -1,26 +1,46 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 
+from qm1d_setup import Grid1D, QM1DConfig, prepare_solver_inputs
+
+
+@dataclass
+class QM1DResult:
+    config: QM1DConfig
+    grid: Grid1D
+    eigenvalues: np.ndarray
+    wavefunctions_full: np.ndarray
+    densities_full: np.ndarray
+    V_full: np.ndarray
+    V_interior: np.ndarray
+    one_particle_densities_full: Optional[np.ndarray] = None
+    orbitals_full: Optional[np.ndarray] = None
+    many_body_method: Optional[str] = None
+    scf_iterations: Optional[int] = None
+    scf_converged: Optional[bool] = None
+    scf_density_change: Optional[float] = None
+    total_density_full: Optional[np.ndarray] = None
+    orbital_occupations: Optional[np.ndarray] = None
+    occupied_orbital_energies: Optional[np.ndarray] = None
+    kpt_reduced: float = 0.0
+
+    @property
+    def many_body_wavefunctions_full(self) -> np.ndarray:
+        return self.wavefunctions_full
+
+
 from plotting import plot_potential_and_orbitals
-from qm1d_setup import QM1DConfig
-from qm1d_solver import QM1DResult, solve_qm1d
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="1D stationary Schrodinger solver demos")
-    parser.add_argument(
-        "--test_zero",
-        action="store_true",
-        help="Run the zero-potential-in-a-box regression test.",
-    )
-    parser.add_argument(
-        "--test_harmonic",
-        action="store_true",
-        help="Run the harmonic-oscillator test.",
-    )
+    parser.add_argument("--test_zero", action="store_true", help="Run the zero-potential-in-a-box regression test.")
+    parser.add_argument("--test_harmonic", action="store_true", help="Run the harmonic-oscillator test.")
     parser.add_argument(
         "--potential_expr",
         type=str,
@@ -33,17 +53,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--L", type=float, help="Half-box length L in Bohr for user-input runs.")
     parser.add_argument("--h_target", type=float, help="Target grid spacing in Bohr for user-input runs.")
     parser.add_argument("--fd_order", type=int, help="Finite-difference order for user-input runs.")
-    parser.add_argument("--n_states", type=int, help="Number of eigenstates to compute for user-input runs.")
-    parser.add_argument(
-        "--boundary",
-        type=str,
-        help="Boundary condition: dirichlet, periodic, or bloch.",
-    )
-    parser.add_argument(
-        "--kpt",
-        type=float,
-        help="Scalar Bloch wavevector in 1/Bohr. Used only when --boundary bloch.",
-    )
+    parser.add_argument("--n_states", type=int, help="Number of eigenstates/orbitals to compute.")
+    parser.add_argument("--boundary", type=str, help="Boundary condition: dirichlet, periodic, or bloch.")
+    parser.add_argument("--kpt", type=float, help="Scalar Bloch wavevector in 1/Bohr. Used only when --boundary bloch.")
     parser.add_argument(
         "--relative_kpt",
         type=float,
@@ -52,31 +64,23 @@ def build_parser() -> argparse.ArgumentParser:
             "relative_kpt * (2*pi/L). Requires --boundary bloch."
         ),
     )
-    parser.add_argument(
-        "--num_electrons",
-        type=int,
-        help="Number of electrons. Currently supported values are 1 and 2.",
-    )
-    parser.add_argument(
-        "--spin_symmetry",
-        type=str,
-        help="For the exact two-electron solver: singlet or triplet.",
-    )
+    parser.add_argument("--num_electrons", type=int, help="Number of electrons. Currently supported values are 1 and 2.")
+    parser.add_argument("--spin_symmetry", type=str, help="For the two-electron solver: singlet or triplet.")
     parser.add_argument(
         "--interaction_softening",
         type=float,
-        help="Softening parameter a in the two-electron soft-Coulomb interaction 1/sqrt((x1-x2)^2+a^2).",
+        help="Softening parameter a in the soft-Coulomb interaction 1/sqrt((x1-x2)^2+a^2).",
     )
     parser.add_argument(
-        "--show_plot",
-        action="store_true",
-        help="Display the plot window in addition to saving the PDF.",
+        "--many_body_method",
+        type=str,
+        help="Many-body approximation method for two-electron runs: HF or DFT (DFT reserved for later).",
     )
-    parser.add_argument(
-        "--output_pdf",
-        default="user_input_potential_orbitals.pdf",
-        help="Output PDF filename for the saved plot.",
-    )
+    parser.add_argument("--scf_tol", type=float, help="SCF density convergence tolerance.")
+    parser.add_argument("--scf_max_iter", type=int, help="Maximum number of SCF iterations.")
+    parser.add_argument("--scf_mixing", type=float, help="Linear density-mixing factor in (0,1].")
+    parser.add_argument("--show_plot", action="store_true", help="Display the plot window in addition to saving the PDF.")
+    parser.add_argument("--output_pdf", default="user_input_potential_orbitals.pdf", help="Output PDF filename for the saved plot.")
     return parser
 
 
@@ -93,8 +97,12 @@ def make_default_config() -> QM1DConfig:
         num_electrons=1,
         spin_symmetry=None,
         interaction_softening=1.0,
+        many_body_method=None,
         parameters={},
         tol=1e-12,
+        scf_tol=1e-8,
+        scf_max_iter=100,
+        scf_mixing=0.3,
     )
 
 
@@ -140,13 +148,35 @@ def make_user_input_config(args: argparse.Namespace) -> QM1DConfig:
         config.spin_symmetry = args.spin_symmetry
     if args.interaction_softening is not None:
         config.interaction_softening = args.interaction_softening
-
+    if args.many_body_method is not None:
+        config.many_body_method = args.many_body_method
+    if args.scf_tol is not None:
+        config.scf_tol = args.scf_tol
+    if args.scf_max_iter is not None:
+        config.scf_max_iter = args.scf_max_iter
+    if args.scf_mixing is not None:
+        config.scf_mixing = args.scf_mixing
     return config
 
 
 def _harmonic_oscillator_theoretical_eigenvalues(n_states: int) -> np.ndarray:
     n = np.arange(n_states, dtype=float)
     return n + 0.5
+
+
+def solve_from_config(config: QM1DConfig) -> QM1DResult:
+    prepared = prepare_solver_inputs(config)
+    if config.many_body_method is None:
+        from qm1d_exact_solver import QM1DExactSolver
+
+        return QM1DExactSolver(prepared, QM1DResult).solve()
+    if config.many_body_method == "HF":
+        from qm1d_scf_solver import QM1DSCFSolver
+
+        return QM1DSCFSolver(prepared, QM1DResult).solve()
+    if config.many_body_method == "DFT":
+        raise NotImplementedError("DFT mode is not implemented yet.")
+    raise ValueError(f"Unsupported many_body_method={config.many_body_method!r}.")
 
 
 def print_summary(result: QM1DResult) -> None:
@@ -161,6 +191,8 @@ def print_summary(result: QM1DResult) -> None:
     print(f"n_states        = {result.config.n_states}")
     print(f"potential_expr  = {result.config.potential_expr}")
     print(f"boundary        = {result.config.boundary}")
+    if result.config.many_body_method is not None:
+        print(f"many_body_method= {result.config.many_body_method}")
     if result.config.num_electrons == 2:
         print(f"spin_symmetry   = {result.config.spin_symmetry}")
         print(f"softening_a     = {result.config.interaction_softening:.10g} Bohr")
@@ -170,9 +202,15 @@ def print_summary(result: QM1DResult) -> None:
         print(f"kpt_input       = {result.config.kpt:.14f} 1/Bohr")
         print(f"kpt_reduced     = {result.kpt_reduced:.14f} 1/Bohr")
         print(f"-kpt_reduced    = {-result.kpt_reduced:.14f} 1/Bohr")
-    print("Eigenvalues (Hartree):")
+    if result.many_body_method == "HF":
+        print(f"scf_iterations  = {result.scf_iterations}")
+        print(f"scf_converged   = {result.scf_converged}")
+        print("Orbital energies (Hartree):")
+    else:
+        print("Eigenvalues (Hartree):")
     for i, ev in enumerate(result.eigenvalues, start=1):
-        print(f"  state {i:2d}: {ev:.14f}")
+        label = "orbital" if result.many_body_method == "HF" else "state"
+        print(f"  {label} {i:2d}: {ev:.14f}")
 
 
 def print_zero_box_comparison(result: QM1DResult) -> None:
@@ -195,17 +233,14 @@ def print_harmonic_oscillator_comparison(result: QM1DResult) -> None:
 
 
 def run_zero_potential_test() -> QM1DResult:
-    result = solve_qm1d(make_zero_potential_test_config())
+    result = solve_from_config(make_zero_potential_test_config())
     print_summary(result)
     print_zero_box_comparison(result)
     return result
 
 
-def run_harmonic_oscillator_test(
-    show_plot: bool = False,
-    output_pdf: str = "harmonic_oscillator_orbitals.pdf",
-) -> QM1DResult:
-    result = solve_qm1d(make_harmonic_oscillator_config())
+def run_harmonic_oscillator_test(show_plot: bool = False, output_pdf: str = "harmonic_oscillator_orbitals.pdf") -> QM1DResult:
+    result = solve_from_config(make_harmonic_oscillator_config())
     print_summary(result)
     print_harmonic_oscillator_comparison(result)
     saved_path = plot_potential_and_orbitals(result, output_pdf=output_pdf, show=show_plot)
@@ -213,12 +248,8 @@ def run_harmonic_oscillator_test(
     return result
 
 
-def run_user_input(
-    args: argparse.Namespace,
-    show_plot: bool = False,
-    output_pdf: str = "user_input_potential_orbitals.pdf",
-) -> QM1DResult:
-    result = solve_qm1d(make_user_input_config(args))
+def run_user_input(args: argparse.Namespace, show_plot: bool = False, output_pdf: str = "user_input_potential_orbitals.pdf") -> QM1DResult:
+    result = solve_from_config(make_user_input_config(args))
     print_summary(result)
     saved_path = plot_potential_and_orbitals(result, output_pdf=output_pdf, show=show_plot)
     print(f"\nSaved figure to: {saved_path}")
