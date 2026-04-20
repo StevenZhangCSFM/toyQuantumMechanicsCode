@@ -23,7 +23,7 @@ class QM1DResult:
     many_body_method: Optional[str] = None
     scf_iterations: Optional[int] = None
     scf_converged: Optional[bool] = None
-    scf_density_change: Optional[float] = None
+    scf_residual: Optional[float] = None
     total_density_full: Optional[np.ndarray] = None
     orbital_occupations: Optional[np.ndarray] = None
     occupied_orbital_energies: Optional[np.ndarray] = None
@@ -76,7 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         help="Many-body approximation method for two-electron runs: HF or DFT (DFT reserved for later).",
     )
-    parser.add_argument("--scf_tol", type=float, help="SCF density convergence tolerance.")
+    parser.add_argument("--scf_tol", type=float, help="SCF commutator-residual convergence tolerance for ||FP-PF||.")
     parser.add_argument("--scf_max_iter", type=int, help="Maximum number of SCF iterations.")
     parser.add_argument("--scf_mixing", type=float, help="Linear density-mixing factor in (0,1].")
     parser.add_argument("--show_plot", action="store_true", help="Display the plot window in addition to saving the PDF.")
@@ -205,6 +205,7 @@ def print_summary(result: QM1DResult) -> None:
     if result.many_body_method == "HF":
         print(f"scf_iterations  = {result.scf_iterations}")
         print(f"scf_converged   = {result.scf_converged}")
+        print(f"scf_residual    = {result.scf_residual:.14e}")
         print("Orbital energies (Hartree):")
     else:
         print("Eigenvalues (Hartree):")

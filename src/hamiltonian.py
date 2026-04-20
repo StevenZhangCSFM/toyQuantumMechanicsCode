@@ -44,39 +44,45 @@ def build_soft_coulomb_matrix(x_interior: np.ndarray, interaction_softening: flo
     return 1.0 / np.sqrt(dx * dx + interaction_softening * interaction_softening)
 
 
-def compute_hartree_potential_from_density(density: np.ndarray, kernel: np.ndarray, h: float) -> np.ndarray:
+def build_hartree_matrix(density: np.ndarray, kernel: np.ndarray, h: float) -> np.ndarray:
     density = np.asarray(density, dtype=float)
-    return h * (kernel @ density)
+    hartree_potential = h * (kernel @ density)
+    return np.diag(hartree_potential)
 
 
-def apply_exchange_operator_to_orbital(
-    psi: np.ndarray,
+def build_exchange_matrix(
     occupied_orbitals: np.ndarray,
     kernel: np.ndarray,
     h: float,
     orbital_occupations: np.ndarray,
     spin_symmetry: str,
 ) -> np.ndarray:
-    psi = np.asarray(psi)
-    occupied_orbitals = np.asarray(occupied_orbitals)
+    occupied_orbitals = np.asarray(occupied_orbitals, dtype=float)
     orbital_occupations = np.asarray(orbital_occupations, dtype=float)
-    result = np.zeros_like(psi, dtype=psi.dtype)
+
+    if occupied_orbitals.ndim != 2:
+        raise ValueError("occupied_orbitals must be a 2D array with shape (N_interior, n_occ).")
+
+    n_interior = occupied_orbitals.shape[0]
+    exchange_matrix = np.zeros((n_interior, n_interior), dtype=float)
 
     if spin_symmetry == "singlet":
         if occupied_orbitals.shape[1] == 0:
-            return result
+            return exchange_matrix
         phi = occupied_orbitals[:, 0]
-        projection = h * (kernel @ (np.conjugate(phi) * psi))
-        result = phi * projection
-        return result
+        exchange_matrix = h * np.outer(phi, phi) * kernel
+        return exchange_matrix
 
     for idx, phi in enumerate(occupied_orbitals.T):
         occ = orbital_occupations[idx] if idx < len(orbital_occupations) else 1.0
         if occ <= 0.0:
             continue
-        projection = h * (kernel @ (np.conjugate(phi) * psi))
-        result += occ * phi * projection
-    return result
+        exchange_matrix += occ * h * np.outer(phi, phi) * kernel
+    return exchange_matrix
+
+
+def apply_exchange_matrix_to_orbital(exchange_matrix: np.ndarray, psi: np.ndarray) -> np.ndarray:
+    return np.asarray(exchange_matrix) @ np.asarray(psi)
 
 
 class OneElectronHamiltonianBase(HamiltonianBase):
@@ -238,7 +244,14 @@ class OneElectronHFHamiltonian(HamiltonianBase):
         density = np.zeros(self.N_interior, dtype=float)
         for occ, phi in zip(self.orbital_occupations, self.occupied_orbitals.T):
             density += occ * np.abs(phi) ** 2
-        self.hartree_potential = compute_hartree_potential_from_density(density, self.kernel, self.h)
+        self.J_matrix = build_hartree_matrix(density, self.kernel, self.h)
+        self.K_matrix = build_exchange_matrix(
+            occupied_orbitals=self.occupied_orbitals,
+            kernel=self.kernel,
+            h=self.h,
+            orbital_occupations=self.orbital_occupations,
+            spin_symmetry=self.spin_symmetry,
+        )
 
     def make_operator(self) -> LinearOperator:
         def matvec(u: np.ndarray) -> np.ndarray:
@@ -254,17 +267,13 @@ class OneElectronHFHamiltonian(HamiltonianBase):
         return self.core.apply_kinetic_only(u)
 
     def apply_hartree_only(self, u: np.ndarray) -> np.ndarray:
-        return self.hartree_potential * u
+        return self.J_matrix @ np.asarray(u, dtype=self.operator_dtype)
 
     def apply_exchange_only(self, u: np.ndarray) -> np.ndarray:
-        return apply_exchange_operator_to_orbital(
-            psi=u,
-            occupied_orbitals=self.occupied_orbitals,
-            kernel=self.kernel,
-            h=self.h,
-            orbital_occupations=self.orbital_occupations,
-            spin_symmetry=self.spin_symmetry,
-        )
+        return apply_exchange_matrix_to_orbital(self.K_matrix, u)
+
+    def build_fock_matrix(self) -> np.ndarray:
+        return self.J_matrix - self.K_matrix
 
     def _apply_hamiltonian(self, u: np.ndarray) -> np.ndarray:
         return self.apply_kinetic_only(u) + self.V_interior * u + self.apply_hartree_only(u) - self.apply_exchange_only(u)

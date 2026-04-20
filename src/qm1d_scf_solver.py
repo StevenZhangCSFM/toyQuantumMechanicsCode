@@ -93,9 +93,47 @@ class QM1DSCFSolver:
         n_occ = 1 if self.effective_spin_symmetry == "singlet" else 2
         return eigenvalues[:n_occ].copy(), self._orthonormalize_orbitals(eigenvectors[:, :n_occ].copy())
 
-    def _mix_density(self, density_old: np.ndarray, density_new: np.ndarray) -> np.ndarray:
+    def _mix_density_matrices(self, density_matrix_old: np.ndarray, density_matrix_new: np.ndarray) -> np.ndarray:
         alpha = self.config.scf_mixing
-        return (1.0 - alpha) * density_old + alpha * density_new
+        return (1.0 - alpha) * density_matrix_old + alpha * density_matrix_new
+
+    def _build_density_matrix(self, occupied_orbitals: np.ndarray) -> np.ndarray:
+        occupied_orbitals = np.asarray(occupied_orbitals, dtype=float)
+        return self.grid.h * (occupied_orbitals @ occupied_orbitals.T)
+
+    def _build_core_hamiltonian_matrix(self) -> np.ndarray:
+        core_hamiltonian = Hamiltonian(
+            N_grid=self.grid.N_grid,
+            h=self.grid.h,
+            fd_order=self.config.fd_order,
+            V_interior=self.V_interior,
+            boundary=self.config.boundary,
+            num_electrons=1,
+        )
+        n = self.grid.N_interior
+        matrix = np.zeros((n, n), dtype=float)
+        eye = np.eye(n, dtype=float)
+        for j in range(n):
+            matrix[:, j] = core_hamiltonian._apply_hamiltonian(eye[:, j])
+        return matrix
+
+    def _build_mixed_orbitals_from_density_matrix(self, density_matrix: np.ndarray) -> np.ndarray:
+        density_matrix = 0.5 * (np.asarray(density_matrix, dtype=float) + np.asarray(density_matrix, dtype=float).T)
+        n_occ = 1 if self.effective_spin_symmetry == "singlet" else 2
+        eigenvalues, eigenvectors = np.linalg.eigh(density_matrix)
+        order = np.argsort(eigenvalues)[::-1]
+        orbitals = []
+        for idx in order[:n_occ]:
+            lam = float(eigenvalues[idx])
+            if lam <= 1e-14:
+                raise QM1DError("Mixed density matrix became rank-deficient during SCF.")
+            orbitals.append(eigenvectors[:, idx] / math.sqrt(self.grid.h * lam))
+        return self._orthonormalize_orbitals(np.column_stack(orbitals))
+
+    def _compute_scf_residual(self, fock_matrix: np.ndarray, occupied_orbitals: np.ndarray) -> float:
+        density_matrix = self._build_density_matrix(occupied_orbitals)
+        commutator = fock_matrix @ density_matrix - density_matrix @ fock_matrix
+        return float(np.linalg.norm(commutator) / self.grid.N_interior)
 
     def _reconstruct_hf_two_electron_wavefunction(self, occupied_orbitals: np.ndarray) -> np.ndarray:
         psi_full = np.zeros((self.grid.N_grid, self.grid.N_grid, 1), dtype=float)
@@ -129,10 +167,10 @@ class QM1DSCFSolver:
 
         occupations = self._get_hf_occupations()
         occupied_orbitals = self._build_initial_hf_orbitals()
-        density = self._build_hf_density(occupied_orbitals)
+        core_hamiltonian_matrix = self._build_core_hamiltonian_matrix()
 
         converged = False
-        density_change = math.inf
+        scf_residual = math.inf
         final_orbital_energies: np.ndarray | None = None
         final_orbitals_all: np.ndarray | None = None
         final_occ_energies: np.ndarray | None = None
@@ -154,26 +192,27 @@ class QM1DSCFSolver:
                 orbital_occupations=occupations,
             )
             operator = hamiltonian.make_operator()
+            fock_matrix = core_hamiltonian_matrix + hamiltonian.build_fock_matrix()
+            scf_residual = self._compute_scf_residual(fock_matrix, occupied_orbitals)
+            print(f"SCF iteration {iteration:3d}: residual = {scf_residual:.14e}")
+
             orbital_energies, orbitals_all = self._solve_one_electron_operator(operator, self.config.n_states)
             occ_energies, new_occupied_orbitals = self._select_hf_occupied_orbitals(orbital_energies, orbitals_all)
-            new_density = self._build_hf_density(new_occupied_orbitals)
-            density_change = math.sqrt(float(np.sum((new_density - density) ** 2) * self.grid.h))
 
             final_orbital_energies = orbital_energies
             final_orbitals_all = orbitals_all
             final_occ_energies = occ_energies
             final_occupied_orbitals = new_occupied_orbitals
 
-            if density_change < self.config.scf_tol:
+            if scf_residual < self.config.scf_tol:
                 occupied_orbitals = new_occupied_orbitals
-                density = new_density
                 converged = True
                 break
 
-            mixed_density = self._mix_density(density, new_density)
-            scale = np.sqrt(np.maximum(mixed_density, 1e-15) / np.maximum(new_density, 1e-15))
-            occupied_orbitals = self._orthonormalize_orbitals(new_occupied_orbitals * scale[:, None])
-            density = self._build_hf_density(occupied_orbitals)
+            density_matrix_old = self._build_density_matrix(occupied_orbitals)
+            density_matrix_new = self._build_density_matrix(new_occupied_orbitals)
+            mixed_density_matrix = self._mix_density_matrices(density_matrix_old, density_matrix_new)
+            occupied_orbitals = self._build_mixed_orbitals_from_density_matrix(mixed_density_matrix)
 
         if final_orbital_energies is None or final_orbitals_all is None or final_occupied_orbitals is None:
             raise QM1DError("HF SCF loop failed to produce a solution.")
@@ -197,7 +236,7 @@ class QM1DSCFSolver:
             many_body_method="HF",
             scf_iterations=iteration,
             scf_converged=converged,
-            scf_density_change=density_change,
+            scf_residual=scf_residual,
             total_density_full=total_density_full,
             orbital_occupations=occupations,
             occupied_orbital_energies=final_occ_energies,
